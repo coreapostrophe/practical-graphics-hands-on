@@ -9,31 +9,37 @@ use winit::{
 };
 #[path = "../common/transform.rs"]
 mod transforms;
+#[path = "../common/vertext_data.rs"]
+mod vertex_data;
+
 const IS_PERSPECTIVE: bool = true;
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 struct Vertex {
-    position: [f32; 3],
+    position: [f32; 4],
+    color: [f32; 4],
 }
 
-fn create_vertices() -> [Vertex; 300] {
-    let mut vertices = [Vertex {
-        position: [0.0, 0.0, 0.0],
-    }; 300];
-    for i in 0..300 {
-        let t = 0.1 * (i as f32) / 30.0;
-        let x = (-t).exp() * (30.0 * t).sin();
-        let z = (-t).exp() * (30.0 * t).cos();
-        let y = 2.0 * t - 1.0;
-        vertices[i] = Vertex {
-            position: [x, y, z],
-        };
+fn vertex(p: [i8; 3], c: [i8; 3]) -> Vertex {
+    Vertex {
+        position: [p[0] as f32, p[1] as f32, p[2] as f32, 1.0],
+        color: [c[0] as f32, c[1] as f32, c[2] as f32, 1.0],
     }
-    vertices
+}
+
+fn create_vertices() -> Vec<Vertex> {
+    let (pos, col, _uv, _normal) = vertex_data::cube_data();
+    let mut data: Vec<Vertex> = Vec::with_capacity(pos.len());
+    for i in 0..pos.len() {
+        data.push(vertex(pos[i], col[i]));
+    }
+    data.to_vec()
 }
 
 impl Vertex {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0=>Float32x3];
+    const ATTRIBUTES: [wgpu::VertexAttribute; 2] =
+        wgpu::vertex_attr_array![0=>Float32x4, 1=>Float32x4];
     fn desc<'a>() -> wgpu::VertexBufferLayout<'a> {
         wgpu::VertexBufferLayout {
             array_stride: mem::size_of::<Vertex>() as wgpu::BufferAddress,
@@ -42,7 +48,6 @@ impl Vertex {
         }
     }
 }
-
 struct State {
     init: transforms::InitWgpu,
     pipeline: wgpu::RenderPipeline,
@@ -53,7 +58,6 @@ struct State {
     view_mat: Matrix4<f32>,
     project_mat: Matrix4<f32>,
 }
-
 impl State {
     async fn new(window: &Window) -> Self {
         let init = transforms::InitWgpu::init_wgpu(window).await;
@@ -61,10 +65,10 @@ impl State {
             .device
             .create_shader_module(&wgpu::ShaderModuleDescriptor {
                 label: Some("Shader"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("line3d.wgsl").into()),
+                source: wgpu::ShaderSource::Wgsl(include_str!("cube_face_color.wgsl").into()),
             });
         // uniform data
-        let camera_position = (1.5, 1.0, 3.0).into();
+        let camera_position = (3.0, 1.5, 3.0).into();
         let look_direction = (0.0, 0.0, 0.0).into();
         let up_direction = cgmath::Vector3::unit_y();
         let model_mat =
@@ -138,11 +142,19 @@ impl State {
                     }],
                 }),
                 primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::LineStrip,
-                    strip_index_format: Some(wgpu::IndexFormat::Uint32),
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    //cull_mode: Some(wgpu::Face::Back),
                     ..Default::default()
                 },
-                depth_stencil: None,
+                //depth_stencil: None,
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth24Plus,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::LessEqual,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
                 multisample: wgpu::MultisampleState::default(),
             });
         let vertex_buffer = init
@@ -192,6 +204,20 @@ impl State {
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let depth_texture = self.init.device.create_texture(&wgpu::TextureDescriptor {
+            size: wgpu::Extent3d {
+                width: self.init.config.width,
+                height: self.init.config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth24Plus,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            label: None,
+        });
+        let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder =
             self.init
                 .device
@@ -214,24 +240,31 @@ impl State {
                         store: true,
                     },
                 }],
-                depth_stencil_attachment: None,
+                //depth_stencil_attachment: None,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: false,
+                    }),
+                    stencil_ops: None,
+                }),
             });
             render_pass.set_pipeline(&self.pipeline);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-            render_pass.draw(0..300, 0..1);
+            render_pass.draw(0..36, 0..1);
         }
         self.init.queue.submit(iter::once(encoder.finish()));
         output.present();
         Ok(())
     }
 }
-
 fn main() {
     env_logger::init();
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new().build(&event_loop).unwrap();
-    window.set_title(&*format!("{}", "ch06-3d-line"));
+    window.set_title(&*format!("{}", "ch06-cube-face-color"));
     let mut state = pollster::block_on(State::new(&window));
     event_loop.run(move |event, _, control_flow| match event {
         Event::WindowEvent {
